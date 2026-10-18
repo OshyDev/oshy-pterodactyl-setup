@@ -4,6 +4,8 @@ set -Eeuo pipefail
 
 PANEL_DIR="/var/www/pterodactyl"
 WINGS_BIN="/usr/local/bin/wings"
+OS_NAME=""
+PHP_VERSION=""
 
 fail() {
     echo "[FEJL] $*" >&2
@@ -16,31 +18,74 @@ info() {
 }
 
 check_root() {
-    [[ $EUID -eq 0 ]] || fail "Kør scriptet som root."
+    [[ $EUID -eq 0 ]] || fail "Kør scriptet med sudo eller som root."
 }
 
-check_os() {
+select_os() {
+    echo "=============================="
+    echo " Pterodactyl Installer"
+    echo "=============================="
+    echo "0) Ubuntu 24.04"
+    echo "1) Debian 12"
+    echo
+
+    read -r -p "Vælg system: " os_choice
+
+    case "$os_choice" in
+        0)
+            OS_NAME="ubuntu"
+            PHP_VERSION="8.3"
+            ;;
+        1)
+            OS_NAME="debian"
+            PHP_VERSION="8.2"
+            ;;
+        *)
+            fail "Ugyldigt valg. Vælg 0 eller 1."
+            ;;
+    esac
+
     source /etc/os-release
-    [[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "24.04" ]] ||
-        fail "Kun Ubuntu 24.04 LTS understøttes."
+
+    [[ "${ID:-}" == "$OS_NAME" ]] ||
+        fail "Du valgte $OS_NAME, men serveren kører ${ID:-ukendt}."
+
+    if [[ "$OS_NAME" == "ubuntu" ]]; then
+        [[ "${VERSION_ID:-}" == "24.04" ]] ||
+            fail "Kun Ubuntu 24.04 understøttes."
+    else
+        [[ "${VERSION_ID:-}" == "12" ]] ||
+            fail "Kun Debian 12 understøttes."
+    fi
+
+    info "Valgt system: $OS_NAME"
+    info "PHP-version: $PHP_VERSION"
 }
 
 install_dependencies() {
-    info "Installerer pakker"
+    info "Installerer afhængigheder"
 
     apt-get update
+
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         ca-certificates curl gnupg unzip tar xz-utils git \
-        nginx mariadb-server redis-server \
-        php8.3 php8.3-cli php8.3-gd php8.3-mysql \
-        php8.3-mbstring php8.3-bcmath php8.3-xml \
-        php8.3-fpm php8.3-curl php8.3-zip php8.3-intl
+        nginx mariadb-server redis-server composer \
+        "php${PHP_VERSION}" \
+        "php${PHP_VERSION}-cli" \
+        "php${PHP_VERSION}-gd" \
+        "php${PHP_VERSION}-mysql" \
+        "php${PHP_VERSION}-mbstring" \
+        "php${PHP_VERSION}-bcmath" \
+        "php${PHP_VERSION}-xml" \
+        "php${PHP_VERSION}-fpm" \
+        "php${PHP_VERSION}-curl" \
+        "php${PHP_VERSION}-zip" \
+        "php${PHP_VERSION}-intl"
 
-    if ! command -v composer >/dev/null 2>&1; then
-        apt-get install -y composer
-    fi
+    systemctl enable --now mariadb redis-server nginx
+    systemctl enable --now "php${PHP_VERSION}-fpm"
 
-    systemctl enable --now mariadb redis-server nginx php8.3-fpm
+    info "Afhængigheder installeret"
 }
 
 install_panel() {
@@ -52,7 +97,6 @@ install_panel() {
     info "Henter Pterodactyl Panel"
 
     mkdir -p "$PANEL_DIR"
-    cd "$PANEL_DIR"
 
     curl -fL --retry 3 \
         https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz \
@@ -61,8 +105,11 @@ install_panel() {
     tar -xzf /tmp/pterodactyl-panel.tar.gz -C "$PANEL_DIR"
     rm -f /tmp/pterodactyl-panel.tar.gz
 
+    cd "$PANEL_DIR"
+
     cp .env.example .env
     chmod -R 755 storage bootstrap/cache
+    chown -R www-data:www-data "$PANEL_DIR"
 
     info "Installerer Composer-pakker"
 
@@ -77,8 +124,8 @@ install_panel() {
     php artisan p:environment:database
 
     echo
-    echo "Sørg for, at database og databasebruger er oprettet."
-    read -r -p "Tryk Enter for at fortsætte med migrationer..."
+    echo "Kontrollér databaseoplysningerne, før du fortsætter."
+    read -r -p "Tryk Enter for at fortsætte..."
 
     php artisan migrate --seed --force
     php artisan p:user:make
@@ -86,9 +133,10 @@ install_panel() {
     chown -R www-data:www-data "$PANEL_DIR"
     chmod -R 755 storage bootstrap/cache
 
-    info "Panel installeret"
-    echo "Konfigurer NGINX, HTTPS, cron og queue worker."
-    echo "Se https://docs.pterodactyl.io/"
+    info "Panel-filer og database er konfigureret"
+
+    echo "NGINX, HTTPS, cron og queue worker skal konfigureres separat."
+    echo "Dokumentation: https://docs.pterodactyl.io/"
 }
 
 install_wings() {
@@ -101,6 +149,7 @@ install_wings() {
     systemctl enable --now docker
 
     local arch
+
     case "$(dpkg --print-architecture)" in
         amd64) arch="amd64" ;;
         arm64) arch="arm64" ;;
@@ -139,27 +188,29 @@ EOF
 
     echo
     echo "Wings er installeret."
-    echo "Opret en node i Panel, og gem dens konfiguration i:"
+    echo "Opret en node i Panel og gem konfigurationen i:"
     echo "/etc/pterodactyl/config.yml"
     echo
-    echo "Start Wings med: systemctl start wings"
+    echo "Start Wings bagefter med:"
+    echo "systemctl start wings"
 }
 
 main() {
     check_root
-    check_os
+    select_os
 
+    echo
     echo "=============================="
-    echo " Pterodactyl Installer"
+    echo " Pterodactyl - $OS_NAME"
     echo "=============================="
     echo "1) Installer afhængigheder"
     echo "2) Installer Panel"
     echo "3) Installer Wings"
-    echo "4) Installer afhængigheder + Panel"
+    echo "4) Afhængigheder + Panel"
     echo "0) Afslut"
     echo
 
-    read -r -p "Vælg: " choice
+    read -r -p "Vælg installation: " choice
 
     case "$choice" in
         1) install_dependencies ;;
